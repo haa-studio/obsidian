@@ -5,7 +5,7 @@ tags: ["QX", "ADC", "driverlib", "例程", "嵌入式控制"]
 ---
 # ADC 软件触发例程学习笔记
 
-关联笔记：[[机器人方向4周学习计划]]、[[CPU Timer 学习笔记]]、[[SCI 串口例程学习笔记]]
+关联笔记：[[机器人方向4周学习计划]]、[[CPU Timer 学习笔记]]、[[SCI 串口例程学习笔记]]、[[ADC 学习路线与底层阅读方法]]
 
 例程位置：
 
@@ -343,3 +343,103 @@ SOC 定义采样任务，软件触发任务，ADCINT 标志表示任务完成，
 ```
 
 读懂这条链，再去看 ePWM 触发 ADC，就不会被寄存器名字绕晕。
+
+## 补充：差分模式下的通道含义
+
+`adc_ex1_soc_software_differential` 只配置 `ADC_CH_ADCIN0`，却能测到 A0 和 A1，是因为它把 ADC 配置成了差分模式：
+
+```c
+AdcaRegs.ADCCTL1.bit.SELVI_HD_LS = 1;
+AdccRegs.ADCCTL1.bit.SELVI_HD_LS = 1;
+```
+
+差分模式下，通道编号代表一对输入，而不是一个独立引脚：
+
+```text
+通道 0 -> ADCIN0(+) - ADCIN1(-)
+通道 2 -> ADCIN2(+) - ADCIN3(-)
+通道 4 -> ADCIN4(+) - ADCIN5(-)
+```
+
+因此：
+
+```text
+ADCA SOC0 + 通道 0 -> A0 - A1 -> ADCARESULT0
+ADCC SOC0 + 通道 2 -> C2 - C3 -> ADCCRESULT0
+```
+
+一次差分转换涉及两个物理引脚，但只产生一个差值结果；不是为两个引脚分别生成两个结果寄存器。
+
+还要区分三个概念：
+
+```text
+SOC -> RESULT：一对一，SOCx 的结果进入 RESULTx
+SOC -> 通道：多对一，多个 SOC 可以重复采同一个通道
+通道 -> 物理输入：单端时是一个引脚，差分时是一对引脚
+```
+
+例如单端模式下，SOC0 和 SOC1 都可以配置为 ADCIN0，它们分别进入 RESULT0 和 RESULT1。
+
+## API 深入：ADC_setInterruptPulseMode
+
+函数原型位于 `adc.h`：
+
+```c
+static inline void ADC_setInterruptPulseMode(uint32_t base,
+                                             ADC_PulseMode pulseMode);
+```
+
+它决定一次 ADC 转换完成脉冲（EOC Pulse）何时产生。这个脉冲可以置位 ADCINT，也可以作为后续触发链的一部分。
+
+常用模式有两个：
+
+```text
+ADC_PULSE_END_OF_CONV
+    转换阶段结束后产生脉冲；结果已经准备好，ISR 中可直接读取。
+
+ADC_PULSE_END_OF_ACQ_WIN
+    采样窗口结束、逐次逼近转换刚开始时就产生脉冲；延迟更低，但此时结果可能还未完成。
+```
+
+底层实现修改的是 `ADCCTL1.INTPULSEPOS` 字段：先清字段，再写入枚举值，并用 `EALLOW/EDIS` 保护寄存器。
+
+本例使用：
+
+```c
+ADC_setInterruptPulseMode(myADC0_BASE, ADC_PULSE_END_OF_CONV);
+```
+
+软件触发、低速轮询例程应优先使用转换结束模式。只有在高速控制环路中明确需要降低中断延迟时，才研究提前脉冲，并结合 `ADC_setInterruptCycleOffset()` 验证转换完成时序。
+
+## API 深入：ADC_disableBurstMode
+
+函数原型位于 `adc.h`：
+
+```c
+static inline void ADC_disableBurstMode(uint32_t base);
+```
+
+它清除 `ADCBURSTCTL.BURSTEN`，让 ADC 回到普通 SOC 触发模式。
+
+```text
+普通模式：每个 SOC 使用自己在 ADC_setupSOC() 中配置的触发源
+突发模式：一个触发源启动一串连续 SOC，由 ADC_setBurstModeConfig() 配置数量
+```
+
+本例显式关闭突发模式，是为了保证软件触发例程的行为确定：SOC0、SOC1 只会按照各自的配置响应软件触发。过采样、多通道连续采集和高速采样调度才需要进一步学习 `ADC_enableBurstMode()` 与 `ADC_setBurstModeConfig()`。
+
+## 本例的底层阅读边界
+
+本例建议先看 API 和数据流，再只对照以下寄存器字段：
+
+```text
+ADCCTL1.INTPULSEPOS       中断脉冲位置
+ADCSOCxCTL.CHSEL          SOC 选择的输入通道
+ADCSOCxCTL.TRIGSEL        SOC 触发源
+ADCSOCxCTL.ACQPS          采样窗口
+ADCINTSEL1N2.INT1SEL      哪个 SOC 置位 ADCINT1
+ADCRESULTx                SOCx 的转换结果
+ADCBURSTCTL.BURSTEN       是否启用突发模式
+```
+
+不要在同一字段上同时使用直接寄存器写法和 driverlib API；后执行的写入会覆盖先执行的配置。
