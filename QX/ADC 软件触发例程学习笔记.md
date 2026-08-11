@@ -5,7 +5,7 @@ tags: ["QX", "ADC", "driverlib", "例程", "嵌入式控制"]
 ---
 # ADC 软件触发例程学习笔记
 
-关联笔记：[[机器人方向4周学习计划]]、[[CPU Timer 学习笔记]]、[[SCI 串口例程学习笔记]]、[[ADC 学习路线与底层阅读方法]]
+关联笔记：[[机器人方向4周学习计划]]、[[CPU Timer 学习笔记]]、[[SCI 串口例程学习笔记]]、[[ADC 学习路线与底层阅读方法]]、[[ADC ePWM 定时触发与中断采样例程]]
 
 例程位置：
 
@@ -34,6 +34,15 @@ ePWM 定时触发 ADC -> ADC 中断里读结果
 ```
 
 这条路线对应 [[机器人方向4周学习计划]] 第 2 周的目标：ADC + EPWM。
+
+与下一例程的关键差别是“谁发起 SOC”：
+
+```text
+adc_ex1_soc_software：CPU 执行 ADC_forceMultipleSOC()，再轮询 ADCINT 标志。
+adc_ex2_soc_epwm：ePWM1 定时产生 SOCA，ADC 完成后真正进入 CPU ISR。
+```
+
+`ex1` 适合理解 SOC、通道、RESULT 和完成标志；`ex2` 才是控制系统中更常用的“PWM 定时采样”闭环。完整时序见 [[ADC ePWM 定时触发与中断采样例程]]。
 
 ## myADC0_init 做了什么
 
