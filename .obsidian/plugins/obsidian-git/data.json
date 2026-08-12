@@ -60,6 +60,8 @@
       "b": 255
     },
     "textColorCss": "var(--text-muted)",
-    "ignoreWhitespace": false
+    "ignoreWhitespace": false,
+    "lastShownAuthorDisplay": "initials",
+    "lastShownDateTimeFormatOptions": "date"
   }
 }
