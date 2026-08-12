@@ -99,6 +99,8 @@ LSPCLK = SYSCLK / 1 = 100 MHz
 
 大多数例程使用共享的 `device.h` 宏，因此会自动随此配置变化。SCI/SPI 通常传入 `DEVICE_LSPCLK_FREQ`，I2C、ePWM、eQEP、CPU Timer 等常使用 `DEVICE_SYSCLK_FREQ`。
 
+但 `DEVICE_SYSCLK_FREQ = 100 MHz` 只确定了系统时钟，不自动保证 ePWM 的 `TBCTR` 以 100 MHz 计数。ePWM 的实际时间基准还要看全局 `EPWMCLK` 分频及各模块的 `HSPCLKDIV`、`CLKDIV`；详见 [[F280049 时钟树]] 与 [[ADC ePWM 定时触发与中断采样例程]]。
+
 少量低功耗例程会在运行中再次调用 `SysCtl_setClock()`，或者存在硬编码的时基参数；修改全局时钟后，这些例程需要单独核对。
 
 相关：[[F280049 时钟树]]、[[SCI FIFO 与 STM32 UART 对比]]、[[SCI 串口例程学习笔记]]
