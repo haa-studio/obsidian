@@ -6,7 +6,7 @@ tags: ["QX", "F280049", "ADC", "ePWM", "中断", "例程", "嵌入式控制"]
 
 # ADC ePWM 定时触发与中断采样例程
 
-关联笔记：[[ADC 软件触发例程学习笔记]]、[[ADC 学习路线与底层阅读方法]]、[[F280049 时钟树]]、[[F280049 时钟配置与 Device_init]]、[[F280049 中断架构与 STM32 对比]]。
+关联笔记：[[ePWM 基础例程学习笔记]]、[[ADC 软件触发例程学习笔记]]、[[ADC 学习路线与底层阅读方法]]、[[F280049 时钟树]]、[[F280049 时钟配置与 Device_init]]、[[F280049 中断架构与 STM32 对比]]。
 
 例程位置：
 
@@ -245,6 +245,16 @@ t_sample = CMPA / TBCLK
 
 但 `SYSCLK = 100 MHz` 不应直接替代 `TBCLK`。实际频率要先确认 `EPWMCLK` 全局分频，再看本例设置的 `/1 × /1` 局部分频；详见 [[F280049 时钟树]]。
 
+
+## 与 ePWM 基础例程的关系
+
+本例把 ePWM 当作 ADC 的硬件触发节拍器，而不是重点演示 PWM 引脚输出。若要理解 `TBCTR`、`TBPRD`、`CMPA`、AQ、同步事件和 Shadow Load，应先看 [[ePWM 基础例程学习笔记]]，再回到本例理解：
+
+```text
+TBCTR == CMPA -> ePWM1 SOCA -> ADCA SOC0 -> ADCINT1
+```
+
+也就是说，ADC 例程中的 ePWM 只使用了 ePWM 事件触发能力；完整的 PWM 输出、相位同步和死区控制，应放在 ePWM 基础例程中学习。
 ## 与软件触发例程的对照
 
 | 项目 | `adc_ex1_soc_software` | `adc_ex2_soc_epwm` |
@@ -283,3 +293,4 @@ t_sample = CMPA / TBCLK
 3. 改变 `TBPRD`，计算并测量采样频率变化。
 4. 将结果通过 SCI 输出，画出波形或导入上位机。
 5. 之后继续学习 `adc_ex10_multiple_soc_epwm`，扩展到多通道同步采样。
+
