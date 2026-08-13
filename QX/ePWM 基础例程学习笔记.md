@@ -1,4 +1,4 @@
-﻿---
+---
 title: "ePWM 基础例程学习笔记"
 created: "2026-08-12"
 tags: ["QX", "F280049", "ePWM", "PWM", "GPIO", "同步", "Shadow", "例程", "嵌入式控制"]
@@ -290,6 +290,185 @@ PWM:     ________________██████________________
 ```
 
 `EPWM_COMP_LOAD_ON_CNTR_ZERO` 表示在 `TBCTR == 0` 这个周期边界加载，适合让每个 PWM 周期开始时统一更新占空比。
+
+## `epwm_ex2_updown_aq`：board.c 与 main.c 的职责
+
+这个例程把内容分在两处；它们不是重复做同一件事。
+
+```text
+board.c：把初始参数和 AQ 规则写入 ePWM 硬件寄存器
+main.c ：保存运行时状态；在中断中决定 CMPA/CMPB 下一步如何变化
+```
+
+`board.c` 做的是“硬件从什么状态开始工作”。例如：
+
+```c
+EPWM_setTimeBasePeriod(myEPWM1_BASE, 2000);
+EPWM_setCounterCompareValue(myEPWM1_BASE, EPWM_COUNTER_COMPARE_A, 50);
+EPWM_setCounterCompareValue(myEPWM1_BASE, EPWM_COUNTER_COMPARE_B, 1950);
+```
+
+它还规定比较事件来临时输出执行什么动作：
+
+```text
+EPWM1A：上数到 CMPA 时置高；下数到 CMPA 时置低
+EPWM1B：上数到 CMPB 时置高；下数到 CMPB 时置低
+```
+
+`main.c` 中的 `EPWMx_MIN_CMPA/B`、`EPWMx_MAX_CMPA/B` 则不是额外写一次初值，而是软件更新算法的边界。例如：
+
+```c
+#define EPWM1_MAX_CMPA 1950U
+#define EPWM1_MIN_CMPA   50U
+```
+
+它们决定 `CMPA` 扫到哪里折返；`CMPB` 同理。`main.c` 里的 `EPWMx_TIMER_TBPRD` 宏目前没有被使用，真正写入 `TBPRD=2000` 的是 `board.c`。这属于示例迁移/生成代码留下的重复定义，应避免两处参数日后改得不一致。
+
+## `updateCompare()`：CMPA/CMPB 的往返扫描
+
+函数位置：`epwm_ex2_updown_aq/main.c`，`updateCompare(epwmInformation *epwmInfo)`。
+
+它**不修改 `TBPRD` 或时钟分频，所以不改变 PWM 频率**。它只移动 `CMPA/CMPB` 这两个比较点；AQ 根据比较点的位置，在相应时刻自动改变引脚电平。因此它造成的是占空比/边沿位置的缓慢变化。
+
+可以把 `CMPA`、`CMPB` 理解为两个在区间内往返移动的滑块：
+
+```text
+CMPA: 50 -> 51 -> ... -> 1950 -> 1949 -> ... -> 50 -> ...
+CMPB: 1950 -> 1949 -> ... -> 50 -> 51 -> ... -> 1950 -> ...
+```
+
+### ePWM1 的初始软件状态
+
+`board.c` 写入初值，`initEPWM1()` 写入方向状态：
+
+```text
+硬件比较寄存器：CMPA = 50，CMPB = 1950
+软件状态：      CMPA 方向 = UP，CMPB 方向 = DOWN，软件计数 = 0
+扫描边界：      CMPA/CMPB 均为 50 到 1950
+```
+
+函数先读取当前值：
+
+```c
+compAValue = EPWM_getCounterCompareValue(..., EPWM_COUNTER_COMPARE_A);
+compBValue = EPWM_getCounterCompareValue(..., EPWM_COUNTER_COMPARE_B);
+```
+
+接着看软件计数器是否为 10：
+
+```c
+if(epwmInfo->epwmTimerIntCount == 10U)
+```
+
+若不是 10，只执行 `epwmTimerIntCount++`，两个比较值都不变。初值为 0，因此第 1 到第 10 次 ISR 都只是计数；第 11 次 ISR 才更新比较值：
+
+| ISR 次数 | 进入时软件计数 | 是否更新 CMP | 退出时软件计数 | CMPA | CMPB |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 1 | 0 | 否 | 1 | 50 | 1950 |
+| 2 | 1 | 否 | 2 | 50 | 1950 |
+| 10 | 9 | 否 | 10 | 50 | 1950 |
+| 11 | 10 | 是 | 0 | 51 | 1949 |
+
+所以源码注释“每 10 次中断更新”并不严格：按现有 `== 10` 写法，是每 **11 次 ISR** 更新。又因为 `board.c` 配置“每 3 个 PWM 周期触发一次 ePWM 中断”，所以一个 CMP 步进相隔 `11 × 3 = 33` 个 PWM 周期。
+
+### 第 11 次 ISR：逐行看状态变化
+
+进入函数时：
+
+```text
+timerIntCount = 10
+CMPA = 50，方向 = UP
+CMPB = 1950，方向 = DOWN
+```
+
+先清零软件计数器：
+
+```c
+epwmInfo->epwmTimerIntCount = 0U;
+```
+
+然后更新 CMPA。方向是 `UP` 且 `50 < 1950`，故执行 `++compAValue`：
+
+```text
+CMPA：50 -> 51；方向仍为 UP
+```
+
+更新 CMPB。方向是 `DOWN` 且 `1950 != 50`，故执行 `--compBValue`：
+
+```text
+CMPB：1950 -> 1949；方向仍为 DOWN
+```
+
+结束状态：
+
+```text
+timerIntCount = 0
+CMPA = 51，方向 = UP
+CMPB = 1949，方向 = DOWN
+```
+
+下一次真正更新时变为 `CMPA=52、CMPB=1948`。每次写入的是 shadow 比较值，配置为在下一个 `TBCTR=0` 装载到 active 寄存器，所以不会在一个 PWM 周期中途突然改变输出。
+
+### 到边界时如何折返
+
+假设 CMPA 已经走到最大值：
+
+```text
+更新前：CMPA = 1950，方向 = UP
+```
+
+由于不再满足 `compAValue < epwmMaxCompA`，程序不会写 `1951`，而是：
+
+```c
+epwmInfo->epwmCompADirection = EPWM_CMP_DOWN;
+--compAValue;  // 1950 -> 1949
+```
+
+因此更新后是：
+
+```text
+CMPA = 1949，方向 = DOWN
+```
+
+在最小值也一样：`CMPA=50、方向=DOWN` 的下一次更新会变成 `CMPA=51、方向=UP`。CMPB 使用完全相同的逻辑，只是它有自己的方向和边界。
+
+### 初始 ePWM1 波形与 CMP 的关系
+
+初始 `CMPA=50`、`CMPB=1950` 时，一个完整的上下计数周期为：
+
+```text
+TBCTR:    0 -> 50 -------------> 1950 -> 2000 -> 1950 -------------> 50 -> 0
+EPWM1A:   低    [上数 CMPA：置高]                         [下数 CMPA：置低] 低
+EPWM1B:   低                         [上数 CMPB：置高] [下数 CMPB：置低]    低
+```
+
+用简化波形表示：
+
+```text
+时间  ---------------------------------------------------------------------->
+TBCTR       /\
+           /  \
+          /    \
+         0      2000      0
+
+EPWM1A  ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|___
+           U-CMPA=50                              D-CMPA=50
+
+EPWM1B  ______________________________________|‾‾|________________________
+                                           U-CMPB=1950 D-CMPB=1950
+```
+
+因此：
+
+```text
+CMPA 小（如 50）   -> EPWM1A 很早置高、很晚置低 -> 高电平很宽
+CMPA 大（如 1950） -> EPWM1A 很晚置高、很早置低 -> 高电平很窄
+
+CMPB 小            -> EPWM1B 高电平很宽
+CMPB 大            -> EPWM1B 高电平很窄
+```
+
+对 ePWM1 而言，`updateCompare()` 让 A 的高电平逐渐变窄、B 的高电平逐渐变宽；走到边界后再反向。该例程没有启用死区模块，因此 ePWM1A/B 不应直接视为可安全驱动半桥的一对互补 PWM。
 
 ## 死区 RED/FED 的 shadow
 
