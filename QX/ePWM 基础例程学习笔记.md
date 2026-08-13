@@ -1,4 +1,4 @@
-﻿---
+---
 title: "ePWM 基础例程学习笔记"
 created: "2026-08-12"
 tags: ["QX", "F280049", "ePWM", "PWM", "GPIO", "同步", "Shadow", "例程", "嵌入式控制"]
