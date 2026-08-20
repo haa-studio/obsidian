@@ -174,6 +174,205 @@ ADC ISR
 
 这就是 PWM 同步 ADC 在电机控制中的真实意义。
 
+## 3.1 QX049 `adc_ex10_multiple_soc_epwm` 源码逐行理解
+
+对应文件：
+
+`C:\Users\OSS\Desktop\f280049revb_evb_examples-master\examples_core0\examples\adc\adc_ex10_multiple_soc_epwm\board.c`
+
+### A. `SYSCLK`、`ADCCLK` 和采样窗口不是同一个概念
+
+这个例程的设备初始化在 `device.h` 中将系统时钟配置为：
+
+```text
+DEVICE_SYSCLK_FREQ = 100 MHz
+```
+
+`SYSCLK` 是芯片的系统主时钟。它可以作为很多外设的时钟来源，但“外设使用的时钟”不一定等于 SYSCLK。ADC 内部有自己的时钟预分频器：
+
+```c
+ADC_setPrescaler(myADC0_BASE, ADC_CLK_DIV_2_0);
+ADC_setPrescaler(myADC1_BASE, ADC_CLK_DIV_2_0);
+```
+
+这里的含义是：ADC 内核时钟 `ADCCLK` 由 ADC 输入时钟经过 `/2` 得到。若当前 ADC 输入时钟就是 100 MHz 的 SYSCLK，则本例中：
+
+```text
+ADCCLK = 100 MHz / 2 = 50 MHz
+```
+
+因此应该记成：
+
+```text
+SYSCLK：系统时钟，当前约 100 MHz
+ADCCLK：ADC 内核转换时钟，由 ADC 预分频器得到，当前约 50 MHz
+```
+
+但 `ADC_setupSOC(..., 8U)` 的最后一个参数，例程注释写的是“8 SYSCLK cycles”，它表示采样保持窗口的配置单位是 SYSCLK 周期，不是说 ADC 内核没有分频，也不是 8 个 ADCCLK 周期。要判断具体转换耗时，还要结合数据手册规定的采样窗口、转换周期和 ADC 内核时钟。
+
+### B. 为什么 `ADC_INT_NUMBER1` 的中断源是 `ADC_SOC_NUMBER2`
+
+源码中的三行配置是：
+
+```c
+ADC_setupSOC(myADC0_BASE, ADC_SOC_NUMBER0, ADC_TRIGGER_EPWM1_SOCA,
+             ADC_CH_ADCIN0, 8U);
+ADC_setupSOC(myADC0_BASE, ADC_SOC_NUMBER1, ADC_TRIGGER_EPWM1_SOCA,
+             ADC_CH_ADCIN1, 8U);
+ADC_setupSOC(myADC0_BASE, ADC_SOC_NUMBER2, ADC_TRIGGER_EPWM1_SOCA,
+             ADC_CH_ADCIN2, 8U);
+```
+
+一次 `EPWM1 SOCA` 到来时，SOC0、SOC1、SOC2 都收到触发请求，分别采样 ADCIN0、ADCIN1、ADCIN2。SOC 编号从 0 开始，所以 `SOC2` 是本批次的第 3 个采样槽位。
+
+随后：
+
+```c
+ADC_setInterruptSource(myADC0_BASE, ADC_INT_NUMBER1, ADC_SOC_NUMBER2);
+```
+
+这句话不是“让 INT1 变成 2”，而是建立一条映射：
+
+```text
+SOC2 转换完成（EOC） -> ADC 内部中断线 INT1 置位
+```
+
+两个编号属于不同对象：
+
+| 名称 | 对象 | 本例含义 |
+|---|---|---|
+| `ADC_SOC_NUMBER2` | ADC 的 SOC 槽位编号 | 第 3 个转换，采样 ADCIN2 |
+| `ADC_INT_NUMBER1` | ADC 模块内部中断线编号 | ADCINT1 |
+| `INT_ADCA1` | PIE/CPU 层面的中断入口 | ADCA 的 ADCINT1 ISR 向量 |
+
+选择 SOC2 作为 INT1 的源，主要是为了让前面三个通道都转换完成后再进入一次 ISR。ISR 中才可以成批读取：
+
+```c
+adcAResult0 = ADC_readResult(..., ADC_SOC_NUMBER0);
+adcAResult1 = ADC_readResult(..., ADC_SOC_NUMBER1);
+adcAResult2 = ADC_readResult(..., ADC_SOC_NUMBER2);
+```
+
+如果把中断源改成 SOC0，ISR 可能在 SOC1、SOC2 还没有完成时就进入，读取到的后两个结果可能还是上一批数据。
+
+### C. “触发转换”和“触发中断”是什么关系
+
+要把它们看成两条不同的链：
+
+```text
+转换启动链：EPWM1 SOCA -> SOC0/SOC1/SOC2 -> ADC 开始采样转换 -> EOC
+
+中断通知链：SOC2 的 EOC -> ADCINT1 标志 -> ADC 模块中断使能
+           -> PIE/CPU 的 INT_ADCA1 -> adcA1ISR()
+```
+
+源码中的：
+
+```c
+ADC_setupSOC(..., ADC_TRIGGER_EPWM1_SOCA, ...);
+```
+
+决定“什么事件启动转换”。它依赖 ePWM 的 SOCA 已配置并通过：
+
+```c
+EPWM_enableADCTrigger(EPWM1_BASE, EPWM_SOC_A);
+```
+
+开启。
+
+源码中的：
+
+```c
+ADC_setInterruptSource(myADC0_BASE, ADC_INT_NUMBER1, ADC_SOC_NUMBER2);
+ADC_enableInterrupt(myADC0_BASE, ADC_INT_NUMBER1);
+```
+
+决定“转换完成后是否向中断控制器发通知，以及由哪个 SOC 的完成事件通知”。主函数中的：
+
+```c
+Interrupt_enable(INT_ADCA1);
+```
+
+则是继续打开 PIE/CPU 这一层的通路。三层都打开，CPU 才会真正跳到 `adcA1ISR()`。
+
+### D. 不开中断、不开触发，分别会发生什么
+
+| 配置状态 | ADC 是否转换 | 结果寄存器是否更新 | 是否进入 ISR |
+|---|---:|---:|---:|
+| ePWM SOCA 开启，ADCINT 开启 | 是 | 是 | 是 |
+| ePWM SOCA 开启，ADCINT 未开启 | 是 | 是 | 否；可轮询 EOC 或直接读结果 |
+| ePWM SOCA 未开启，ADCINT 开启 | 否 | 不产生新结果 | 否；没有新的 EOC 就没有新中断 |
+| 两者都未开启 | 否 | 不产生新结果 | 否 |
+
+所以：
+
+> ADC 中断不会主动启动一次 ADC 转换；它只是转换完成后的“通知”。真正启动转换的是 SOC 的触发源。
+
+### E. `ADC_INT_SOC_TRIGGER_NONE` 容易误解
+
+每个 SOC 后面的：
+
+```c
+ADC_setInterruptSOCTrigger(myADC0_BASE, ADC_SOC_NUMBER2,
+                           ADC_INT_SOC_TRIGGER_NONE);
+```
+
+控制的是反向路径“ADC 中断是否反过来触发某个 SOC”。设为 `NONE` 表示不使用 ADCINT1/2 去再次启动 SOC。它不等于“关闭 ADCINT1”，也不影响下面这句将 SOC2 的 EOC 映射给 ADCINT1：
+
+```c
+ADC_setInterruptSource(myADC0_BASE, ADC_INT_NUMBER1, ADC_SOC_NUMBER2);
+```
+
+本例采用的是单向链路：
+
+```text
+ePWM SOCA -> SOC -> EOC -> ADCINT1 -> ISR
+```
+
+而不是：
+
+```text
+ADCINT1 -> 再触发下一个 SOC
+```
+
+### F. 为什么要清中断标志
+
+本例关闭了 ADCINT 连续模式：
+
+```c
+ADC_disableContinuousMode(myADC0_BASE, ADC_INT_NUMBER1);
+```
+
+因此 ISR 中必须执行：
+
+```c
+ADC_clearInterruptStatus(ADCA_BASE, ADC_INT_NUMBER1);
+```
+
+否则中断标志可能一直保持置位，下一批转换不能按预期再次产生正常中断；如果新的 EOC 在旧标志未清除时到来，还可能出现 ADCINT overflow。最后还要：
+
+```c
+Interrupt_clearACKGroup(INTERRUPT_ACK_GROUP1);
+```
+
+释放 PIE 第 1 组，使 CPU 可以继续响应下一次 ADCA1 中断。
+
+## 3.2 读 ADC 例程的固定顺序
+
+以后阅读任意 ADC 例程，按以下顺序查：
+
+1. `Device_init()` / `device.h`：确认 `SYSCLK`。
+2. `ADC_setPrescaler()`：确认 `ADCCLK` 分频。
+3. `ADC_setupSOC()`：确认 SOC 编号、触发源、通道、采样窗口。
+4. ePWM 配置：确认 SOCA/SOCB 在什么计数事件产生、是否真正 enable。
+5. `ADC_setInterruptSource()`：确认哪个 SOC 的 EOC 负责 ADCINT1/2/3/4。
+6. `ADC_enableInterrupt()` 和 `Interrupt_enable()`：确认 ADC 模块、PIE/CPU 两级中断是否都打开。
+7. ISR：确认读取哪些 RESULT、清哪些标志、是否处理 overflow。
+
+本例可以压缩成一句话：
+
+> 100 MHz SYSCLK 经 ADC `/2` 得到约 50 MHz ADCCLK；ePWM1 的 SOCA 同时启动 ADCA 的 SOC0/1/2；SOC2 最后完成后置位 ADCINT1；ADCINT1 再经 PIE/CPU 调用 ISR，ISR 批量读取三个结果并清标志。
+
 ## 4. eQEP 如何连接到电机
 
 eQEP 不负责输出功率，也不负责测电流。它负责获取转子位置和速度。
