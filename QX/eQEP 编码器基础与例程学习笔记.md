@@ -582,3 +582,109 @@ GPIO12         -> EQEP1_STROBE
 4. QPOSCNT 如何换算机械角和电角度。
 5. FR 和 PR 两种速度估算为什么分别适合高速和低速。
 ```
+
+## 调试本例：直接看哪些 eQEP 寄存器
+
+这一节回答一个很实际的问题：程序跑起来后，不先看复杂公式，直接在 CCS 的 Expressions / Watch 窗口看哪里，才能确认 A/B、Index、Strobe 和测速是否真的工作。
+
+### 最重要的四个：先看这四个就够了
+
+```c
+EQep1Regs.QPOSCNT
+EQep1Regs.QPOSILAT
+EQep1Regs.QFLG.bit.IEL
+EQep1Regs.QEPSTS.bit.QDF
+```
+
+| 想确认的事情 | 看哪个寄存器 / 位 | 正常现象 |
+|---|---|---|
+| A/B 相是否真的被 eQEP 计数 | `QPOSCNT[31:0]` | 转动时数值持续增大或减小 |
+| 当前方向是否正确 | `QEPSTS.bit.QDF`（bit 5） | `1` 为正向/CW，`0` 为反向/CCW |
+| Index 脉冲是否到达 eQEP | `QFLG.bit.IEL`（bit 10） | Index 锁存发生后该位为 `1` |
+| Index 到来瞬间的位置是多少 | `QPOSILAT[31:0]` | 它保存 Index 边沿那一刻的 `QPOSCNT` |
+
+把 `QPOSCNT` 想成正在不断变化的“里程表”；把 `QPOSILAT` 想成 Index 到来的一瞬间拍下来的“照片”。因此 `QPOSILAT` 不是 Index 引脚的高低电平，而是 Index 发生时的位置计数值。
+
+### 本例各个结果对应的寄存器
+
+| 结果 | 寄存器 | 位 / 字段 | 它保存的东西 |
+|---|---|---|---|
+| 当前实时位置 | `QPOSCNT` | `31:0` | 当前 A/B 正交累计计数 |
+| Index 时的位置快照 | `QPOSILAT` | `31:0` | Index 有效边沿瞬间的 `QPOSCNT` |
+| Strobe 时的位置快照 | `QPOSSLAT` | `31:0` | Strobe 有效边沿瞬间的 `QPOSCNT` |
+| 固定时间窗口的位置快照 | `QPOSLAT` | `31:0` | 单位定时器超时时锁存的位置，供高速测速使用 |
+| 低速测速的时间间隔 | `QCPRDLAT` | `15:0` | 两次单位位置事件之间的 QCAPCLK 个数 |
+| 当前方向 | `QEPSTS.QDF` | bit 5 | `1` 正向，`0` 反向 |
+| Index 发生时的方向 | `QEPSTS.QDLF` | bit 4 | Index 锁存瞬间的方向 |
+| 有新的低速测速数据 | `QEPSTS.UPEVNT` | bit 7 | `1` 代表发生新的单位位置事件 |
+| 低速捕获计时器溢出 | `QEPSTS.COEF` | bit 3 | `1` 代表本次低速测速值无效，时间过长溢出 |
+| 捕获期间改变了方向 | `QEPSTS.CDEF` | bit 2 | `1` 代表本次低速测速值无效，期间发生换向 |
+| Index 锁存事件发生 | `QFLG.IEL` | bit 10 | `1` 代表 `QPOSILAT` 已被 Index 更新 |
+| Strobe 锁存事件发生 | `QFLG.SEL` | bit 9 | `1` 代表 `QPOSSLAT` 已被 Strobe 更新 |
+| 单位定时器超时 | `QFLG.UTO` | bit 11 | `1` 代表 `QPOSLAT` 等锁存值已更新 |
+
+### 和本例代码逐项对上
+
+本例设置：
+
+```c
+EQEP_setPositionCounterConfig(myEQEP0_BASE,
+                              EQEP_POSITION_RESET_IDX,
+                              4294967295U);
+```
+
+含义是 `QEPCTL[PCRM] = 00`：位置计数器选择“Index 事件复位”。所以正转时发生 Index 的顺序是：
+
+```text
+Index 上升沿来到 GPIO9/eQEP1I
+        ↓
+当前 QPOSCNT 先复制到 QPOSILAT
+        ↓
+QFLG.bit.IEL 置 1，表示 Index 锁存事件已经发生
+        ↓
+正转：QPOSCNT 复位为 0
+反转：QPOSCNT 复位为 QPOSMAX = 0xFFFFFFFF
+```
+
+因此调试时看到 `QPOSILAT` 不是 0、而紧接着 `QPOSCNT` 变为 0，并不矛盾：前者是复位前的瞬时快照，后者是复位后的当前计数值。
+
+本例的硬件连接是：
+
+```text
+GPIO0 / ePWM1A  -> GPIO6 / eQEP1A
+GPIO1 / ePWM1B  -> GPIO7 / eQEP1B
+GPIO4           -> GPIO9 / eQEP1I (Index)
+```
+
+`main.c` 的 ISR 每 1000 次 ePWM 中断会把 GPIO4 拉高再拉低一次，模拟每圈一个 Index 脉冲：
+
+```c
+GPIO_writePin(4, 1);
+// 短暂延时
+GPIO_writePin(4, 0);
+```
+
+因此，这个例程优先验证 Index，应看 `QPOSILAT` 和 `QFLG.bit.IEL`。
+
+虽然 `board.c` 也配置了 `EQEP_LATCH_RISING_STROBE`，但当前例程没有把一个实际信号接到 `GPIO12 / eQEP1STROBE`，也没有软件去翻转 GPIO12。因此 `QPOSSLAT` 和 `QFLG.bit.SEL` 在本例中通常不会有新的有效变化；它们只是“Strobe 功能已经配置好，等待外部 Strobe 信号”的状态，不是本例主要结果。
+
+### 软件计算结果看哪里
+
+寄存器是硬件原始结果；计算后的最终变量看：
+
+```c
+posSpeed.thetaMech     // 机械角度，Q15 归一化值
+posSpeed.thetaElec     // 电角度，Q15 归一化值
+posSpeed.speedRPMFR    // 高速算法得到的 rpm
+posSpeed.speedRPMPR    // 低速捕获算法得到的 rpm
+```
+
+最实用的观察顺序：
+
+1. `QPOSCNT` 是否变化：先确认 A/B 接线和正交计数工作。
+2. `QEPSTS.bit.QDF` 是否随预期方向变化：确认方向没反。
+3. `QFLG.bit.IEL` 和 `QPOSILAT`：确认 GPIO4 -> GPIO9 的 Index 脉冲工作。
+4. `QPOSLAT` 与 `posSpeed.speedRPMFR`：确认高速测速数据链路工作。
+5. `QEPSTS.bit.UPEVNT`、`QCPRDLAT` 与 `posSpeed.speedRPMPR`：确认低速捕获测速链路工作。
+
+注意：例程中的 `PosSpeed_calculate()` 在读到 `QFLG.bit.IEL` 或 `QFLG.bit.UTO` 后会清除相应标志。所以如果 CCS 刷新得太慢，你可能看不到 `IEL` / `UTO` 短暂为 `1`。这时更可靠的结果是直接观察 `QPOSILAT`、`QPOSLAT` 和最终变量；或者在调试暂停后查看标志。
