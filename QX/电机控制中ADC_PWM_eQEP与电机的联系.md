@@ -524,20 +524,22 @@ PWM 立即进入安全状态
 
 ## 9. QX049 例程与真实电机系统的对应关系
 
-| QX049 例程 | 真实系统对应部分 | 当前缺少 |
-|---|---|---|
-| adc_ex2_soc_epwm | PWM 同步采集相电流 | 采样电阻、运放、功率级 |
-| adc_ex10_multiple_soc_epwm | 同步采集多相电流和母线电压 | 真实电机电流源 |
-| adc_ex13_soc_oversampling | 降低采样噪声 | 真实功率开关噪声 |
-| adc_ex7_ppb_offset | 电流采样零点校准 | 实际电流传感器 |
-| adc_ex8_ppb_limits | 过流检测 | 真实过流事件 |
-| epwm_ex3_synchronization | 三相 PWM 同步 | 三相逆变桥 |
-| epwm_ex8_deadband | 上下桥臂防直通 | 栅极驱动器和功率管 |
-| epwm_ex1_trip_zone | 过流、欠压或故障关断 | 真实硬件故障信号 |
-| eqep_ex2_pos_speed | 编码器位置和速度反馈 | 真实电机编码器 |
-| sci 例程 | 上位机调参与状态监控 | 完整驱动器参数 |
-| timer_1ms | 速度环、状态机、故障管理 | 完整控制任务 |
-| dma_output_spwm_by_load_mode | 自动更新调制波 | 不能代替 FOC |
+| QX049 例程                     | 真实系统对应部分      | 当前缺少        |
+| ---------------------------- | ------------- | ----------- |
+| adc_ex2_soc_epwm             | PWM 同步采集相电流   | 采样电阻、运放、功率级 |
+| adc_ex10_multiple_soc_epwm   | 同步采集多相电流和母线电压 | 真实电机电流源     |
+| adc_ex13_soc_oversampling    | 降低采样噪声        | 真实功率开关噪声    |
+| adc_ex7_ppb_offset           | 电流采样零点校准      | 实际电流传感器     |
+| adc_ex8_ppb_limits           | 过流检测          | 真实过流事件      |
+| epwm_ex3_synchronization     | 三相 PWM 同步     | 三相逆变桥       |
+| epwm_ex8_deadband            | 上下桥臂防直通       | 栅极驱动器和功率管   |
+| epwm_ex1_trip_zone           | 过流、欠压或故障关断    | 真实硬件故障信号    |
+| eqep_ex2_pos_speed           | 编码器位置和速度反馈    | 真实电机编码器     |
+| sci 例程                       | 上位机调参与状态监控    | 完整驱动器参数     |
+| timer_1ms                    | 速度环、状态机、故障管理  | 完整控制任务      |
+| dma_output_spwm_by_load_mode | 自动更新调制波       | 不能代替 FOC    |
+
+`adc_ex13_soc_oversampling` 的详细源码解读、4 次平均、噪声与实时性实验记录见：[[ADC_ex13_SOC过采样例程学习笔记]]。
 
 ## 10. 你当前 QX049 项目的准确定位
 
