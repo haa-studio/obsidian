@@ -16,6 +16,8 @@ tags:
 
 # `epwm_ex1_trip_zone` 跳闸保护例程学习笔记
 
+本页已合并 `TZ1/TZ2/TZ3/TZ4`、X-BAR 路由和三个核心 API 的说明，相关内容见第 14 节。
+
 ## 1. 这个例程演示什么
 
 例程目录：
@@ -404,3 +406,164 @@ Trip Zone 快速关断/保护
 
 > ePWM 正常由 TBCTR、CMPA 和 AQ 产生波形；Trip Zone 是更高优先级的硬件保护路径，故障到来时直接覆盖正常 PWM 输出。OST 锁存，CBC 逐周期恢复。
 
+## 14. TZ1/TZ2/TZ3/TZ4 与三个 API
+
+### 14.1 TZ1、TZ2、TZ3、TZ4 是什么
+
+它们是 ePWM 的不同故障输入通道：
+
+```text
+TZ1：故障输入 1
+TZ2：故障输入 2
+TZ3：故障输入 3
+TZ4：故障输入 4
+```
+
+它们不是 PWM 输出、CPU 中断编号或故障等级。例程选择 TZ1，不是因为 TZ1 比 TZ2/TZ3/TZ4 更强，而是因为例程把 GPIO12 路由到了第一条 X-BAR 输入路径。
+
+### 14.2 GPIO12、XBAR_INPUT1、TZ1 的关系
+
+例程中的：
+
+```c
+GPIO_setDirectionMode(myGPIO12, GPIO_DIR_MODE_IN);
+GPIO_setPadConfig(myGPIO12,
+                  GPIO_PIN_TYPE_STD | GPIO_PIN_TYPE_PULLUP);
+XBAR_setInputPin(XBAR_INPUT1, 12);
+```
+
+三个对象要分开：
+
+| 对象 | 含义 |
+|---|---|
+| `GPIO12` | 芯片外部真实物理引脚 |
+| `XBAR_INPUT1` | 芯片内部信号路由通道 |
+| `TZ1` | ePWM 的第 1 个 Trip Zone 输入 |
+
+`XBAR_setInputPin(XBAR_INPUT1, 12)` 只表示：
+
+```text
+把 GPIO12 的电平接到内部 XBAR_INPUT1 信号线上
+```
+
+它不负责把 GPIO12 配成输入、不负责打开上拉、不负责触发 PWM 保护，也不负责产生 CPU 中断。完整路径是：
+
+```text
+GPIO12 -> XBAR_INPUT1 -> ePWM TZ1
+```
+
+GPIO12 由内部上拉保持高电平；外部把它拉低后，TZ1 才得到有效故障信号。
+
+不要混淆：
+
+```text
+GPIO12       ：物理引脚编号
+XBAR_INPUT1  ：内部路由编号
+TZ1          ：ePWM 故障输入编号
+TZA          ：故障时被控制的 PWM A 输出
+```
+
+### 14.3 `EPWM_setTripZoneAction`
+
+```c
+EPWM_setTripZoneAction(myEPWM1_BASE,
+                       EPWM_TZ_ACTION_EVENT_TZA,
+                       EPWM_TZ_ACTION_HIGH);
+```
+
+这个 API 决定：
+
+> Trip Zone 发生后，哪个 PWM 输出被强制成什么状态。
+
+本例含义是：
+
+```text
+配置 ePWM1A；故障时强制 ePWM1A 为高电平
+```
+
+`TZA/TZB` 是 PWM 输出 A/B，不是 `TZ1/TZ2` 故障输入。常见动作还有：
+
+```c
+EPWM_TZ_ACTION_LOW       // 强制低电平
+EPWM_TZ_ACTION_HIGH_Z    // 高阻态
+```
+
+本例用 HIGH 主要是为了示波器观察。真实半桥中必须根据栅极驱动器逻辑和功率级拓扑选择安全状态。
+
+### 14.4 `EPWM_enableTripZoneSignals`
+
+```c
+EPWM_enableTripZoneSignals(myEPWM1_BASE,
+                           EPWM_TZ_SIGNAL_OSHT1);
+```
+
+这个 API 决定：
+
+> 哪个 TZ 输入参与保护，以及它采用哪种保护模式。
+
+本例中：
+
+```text
+OSHT：One-Shot，一次性跳闸
+1：使用 TZ1 输入
+```
+
+即：
+
+```text
+允许 TZ1 触发 ePWM1 的 OST 保护
+```
+
+如果改用 TZ2，概念上对应：
+
+```c
+EPWM_enableTripZoneSignals(EPWM1_BASE,
+                           EPWM_TZ_SIGNAL_OSHT2);
+```
+
+这只是改变故障输入路径，不会自动改变故障时 ePWM1A 的输出动作。若芯片和 SDK 支持，也可以用按位或同时启用多个故障源。
+
+### 14.5 `EPWM_enableTripZoneInterrupt`
+
+```c
+EPWM_enableTripZoneInterrupt(EPWM1_BASE,
+                             EPWM_TZ_INTERRUPT_OST);
+```
+
+这个 API 决定：
+
+> Trip Zone 事件发生后，是否额外通知 CPU 进入 TZ ISR。
+
+它不等于开启硬件保护。应区分两条路径：
+
+```text
+硬件路径：TZ1 -> Trip Zone -> 直接覆盖 ePWM 输出
+
+通知路径：TZ1 -> TZ 标志 -> TZ 中断 -> CPU ISR
+```
+
+即使 CPU 没及时进入 ISR，只要 Trip Zone 信号和输出动作已经配置，硬件仍可以先保护 PWM。ISR 主要用于计数、记录、上报和恢复管理。
+
+### 14.6 三个 API 合在一起怎么读
+
+```c
+EPWM_setTripZoneAction(myEPWM1_BASE,
+                       EPWM_TZ_ACTION_EVENT_TZA,
+                       EPWM_TZ_ACTION_HIGH);
+EPWM_enableTripZoneSignals(myEPWM1_BASE,
+                           EPWM_TZ_SIGNAL_OSHT1);
+EPWM_enableTripZoneInterrupt(myEPWM1_BASE,
+                             EPWM_TZ_INTERRUPT_OST);
+```
+
+自然语言翻译：
+
+```text
+把 ePWM1A 配置为：发生 Trip Zone 时强制输出高电平；
+允许 ePWM1 的 TZ1 输入触发一次性跳闸；
+并允许这个 OST 事件通知 CPU 进入中断。
+```
+
+一句话区分三个 API：
+
+> `EPWM_setTripZoneAction()` 决定“故障时输出变成什么”；`EPWM_enableTripZoneSignals()` 决定“哪个 TZ 输入、以哪种模式生效”；`EPWM_enableTripZoneInterrupt()` 决定“是否通知 CPU”。
