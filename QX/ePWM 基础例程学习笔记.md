@@ -513,6 +513,8 @@ ET：ePWM 中断、ADC SOCA/SOCB 触发
 
 ## 一句话总结
 
+Trip Zone 例程的详细源码、OST/CBC 对比和电机过流保护映射见：[[ePWM_ex1_TripZone跳闸保护例程学习笔记]]。
+
 学 ePWM 时不要先背所有子模块名。先抓住这条主线：
 
 ```text
