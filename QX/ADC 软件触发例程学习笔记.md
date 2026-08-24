@@ -744,3 +744,282 @@ ADC_disablePPBEventInterrupt(...);
 ```
 
 所以本例的目标仅仅是验证：硬件可以自动对 ADCA 结果减 100、对 ADCC 结果加 100；它不演示 PPB 越限保护和 PPB 事件中断。
+
+## 例程：`adc_ex8_ppb_limits`，PPB 限值检测与事件中断
+
+关联例程路径：`examples_core0/examples/adc/adc_ex8_ppb_limits`。
+
+这个例程的目的不是校正 ADC 数值，而是让 PPB 每次在 ADC 转换完成后自动判断结果是否越界：
+
+```text
+输入电压低于下限 -> PPB 产生 TRIPLO 事件
+输入电压高于上限 -> PPB 产生 TRIPHI 事件
+输入电压在范围内 -> 不产生 PPB 事件
+```
+
+外部连接只有一个：
+
+```text
+A0 / ADCINA0 <- 需要测量的模拟信号
+```
+
+本例使用外部 3.3 V ADC 参考、12 位 ADC：
+
+```text
+0 V    -> 约 0
+3.3 V  -> 约 4095
+```
+
+### 1. 完整硬件链路
+
+```text
+ePWM1 的 TBCTR 上数到 CMPA
+    -> ePWM1 SOCA
+    -> ADCA SOC0 采样 A0
+    -> SOC0 转换完成，ADCRESULT0 更新，产生 EOC0
+    -> ADCA PPB1 对结果与上下限比较
+    -> TRIPHI 或 TRIPLO 事件置位
+    -> ADCA Event Interrupt（INT_ADCA_EVT）
+    -> adcAEvtISR()
+```
+
+主循环是空的：
+
+```c
+do
+{
+} while (1);
+```
+
+这不代表程序没有工作。ePWM、ADC、PPB 和事件中断都在硬件中自动运行；只有越界才会打断主循环进入 ISR。
+
+### 2. ePWM1 决定 ADC 的采样节拍和采样时刻
+
+`configureEPWM()` 的关键配置：
+
+```c
+EPWM_setADCTriggerSource(EPWM1_BASE, EPWM_SOC_A,
+                         EPWM_SOC_TBCTR_U_CMPA);
+EPWM_setADCTriggerEventPrescale(EPWM1_BASE, EPWM_SOC_A, 1U);
+EPWM_setCounterCompareValue(EPWM1_BASE, EPWM_COUNTER_COMPARE_A, 2048U);
+EPWM_setTimeBasePeriod(EPWM1_BASE, 4096U);
+```
+
+含义：
+
+```text
+TBCTR: 0 -> ... -> 2048 -> ... -> 4096 -> 回到 0
+                     |
+                     +-> 上数等于 CMPA，产生一次 SOCA
+```
+
+`SOC A` 的分频为 `1`，所以每次符合条件的 CMPA 上数事件都触发一次 ADC。计数器一开始被冻结，直到所有配置完成后才执行：
+
+```c
+EPWM_enableADCTrigger(EPWM1_BASE, EPWM_SOC_A);
+EPWM_setTimeBaseCounterMode(EPWM1_BASE, EPWM_COUNTER_MODE_UP);
+```
+
+这保证 ADC 不会在 ePWM 尚未配置完整时提前被触发。
+
+### 3. SOC0：ePWM SOCA 到 A0 采样
+
+```c
+ADC_setupSOC(ADCA_BASE, ADC_SOC_NUMBER0,
+             ADC_TRIGGER_EPWM1_SOCA,
+             ADC_CH_ADCIN0, 8U);
+```
+
+对应关系：
+
+| 项目 | 本例配置 | 含义 |
+| --- | --- | --- |
+| ADC 模块 | ADCA | 使用 A 组 ADC。 |
+| SOC | SOC0 | 这张采样任务单编号为 0。 |
+| 触发源 | ePWM1 SOCA | PWM 指定时刻到来才采样。 |
+| 输入通道 | ADCIN0 / A0 | 采样外部 A0 模拟电压。 |
+| 采样窗口 | `8U` | ADC 对 A0 采样保持的配置时间。 |
+
+### 4. PPB1 的上下限配置
+
+PPB1 绑定 SOC0：
+
+```c
+ADC_setupPPB(ADCA_BASE, ADC_PPB_NUMBER1, ADC_SOC_NUMBER0);
+```
+
+本例没有使用偏移校正和参考值相减：
+
+```c
+ADC_setPPBCalibrationOffset(ADCA_BASE, ADC_PPB_NUMBER1, 0);
+ADC_setPPBReferenceOffset(ADCA_BASE, ADC_PPB_NUMBER1, 0);
+ADC_disablePPBTwosComplement(ADCA_BASE, ADC_PPB_NUMBER1);
+```
+
+因此本例中：
+
+```text
+PPBRESULT = ADCRESULT0 = A0 的 ADC 转换值
+```
+
+限值配置为：
+
+```c
+ADC_setPPBTripLimits(ADCA_BASE, ADC_PPB_NUMBER1, 3000, 1000);
+```
+
+函数参数顺序是：
+
+```text
+ADC_setPPBTripLimits(ADC模块, PPB编号, 高限, 低限)
+```
+
+所以判断区间为：
+
+```text
+0 -------- 1000 ----------------------- 3000 -------- 4095
+|  TRIPLO  |          正常范围            |  TRIPHI  |
+```
+
+近似换算公式：
+
+```text
+Vin = ADC_code / 4096 * 3.3 V
+```
+
+| 限值 | 对应电压 | PPB 动作 |
+| --- | ---: | --- |
+| `1000` | 约 `0.806 V` | 低于它，产生 `TRIPLO`。 |
+| `3000` | 约 `2.417 V` | 高于它，产生 `TRIPHI`。 |
+
+因此 A0 在约 `0.8 V ~ 2.4 V` 内为正常；低于或高于此范围会发生 PPB 事件。
+
+### 5. 普通 ADCINT1 与 PPB Event 不是同一个中断
+
+代码还配置了：
+
+```c
+ADC_setInterruptSource(ADCA_BASE, ADC_INT_NUMBER1, ADC_SOC_NUMBER0);
+ADC_enableInterrupt(ADCA_BASE, ADC_INT_NUMBER1);
+```
+
+它只表示：
+
+```text
+SOC0 完成 -> EOC0 -> ADCINT1 标志
+```
+
+但本例没有：
+
+```c
+Interrupt_register(INT_ADCA1, ...);
+```
+
+所以 SOC0 每次正常完成时，CPU **不会**进入普通 `INT_ADCA1` ISR。
+
+本例实际注册的是：
+
+```c
+Interrupt_register(INT_ADCA_EVT, &adcAEvtISR);
+Interrupt_enable(INT_ADCA_EVT);
+```
+
+二者区别：
+
+| 路径 | 触发条件 | 本例是否进 CPU ISR |
+| --- | --- | --- |
+| `EOC0 -> ADCINT1 -> INT_ADCA1` | 每一次 SOC0 转换完成 | 否。 |
+| `PPB1 -> TRIPHI/TRIPLO -> INT_ADCA_EVT` | 仅结果超过高限或低于低限 | 是，进入 `adcAEvtISR()`。 |
+
+一句话：`ADCINT1` 说明“转换完成”，`ADCA_EVT` 说明“转换结果异常”。
+
+### 6. PPB 事件到底开了哪条路径
+
+```c
+ADC_disablePPBEvent(ADCA_BASE, ADC_PPB_NUMBER1,
+                    ADC_EVT_TRIPHI | ADC_EVT_TRIPLO | ADC_EVT_ZERO);
+
+ADC_enablePPBEventInterrupt(ADCA_BASE, ADC_PPB_NUMBER1,
+                             ADC_EVT_TRIPHI | ADC_EVT_TRIPLO);
+ADC_disablePPBEventInterrupt(ADCA_BASE, ADC_PPB_NUMBER1,
+                              ADC_EVT_ZERO);
+```
+
+这里有两条独立输出路径：
+
+```text
+ADC_enablePPBEvent()
+    -> PPB 事件送 X-Bar 或 ePWM：适合连 Trip Zone，硬件立即关 PWM。
+
+ADC_enablePPBEventInterrupt()
+    -> PPB 事件送 CPU：进入 INT_ADCA_EVT ISR，用于记录和软件故障处理。
+```
+
+本例的选择是：关闭 PPB 到 X-Bar/ePWM 的硬件输出，仅开启 `TRIPHI` 和 `TRIPLO` 到 CPU 的事件中断。因此它演示“检测和报告”，但没有真正把 PWM 关断。
+
+### 7. `adcAEvtISR()` 如何识别并清除事件
+
+```c
+intStatus = ADC_getPPBEventStatus(ADCA_BASE, ADC_PPB_NUMBER1);
+```
+
+`intStatus` 是位掩码：
+
+```text
+ADC_EVT_TRIPHI = 0x0001  // 超过高限
+ADC_EVT_TRIPLO = 0x0002  // 低于低限
+ADC_EVT_ZERO   = 0x0004  // 过零事件
+```
+
+所以 ISR 分别判断：
+
+```c
+if ((intStatus & ADC_EVT_TRIPHI) != 0U)
+{
+    ADC_clearPPBEventStatus(ADCA_BASE, ADC_PPB_NUMBER1,
+                            ADC_EVT_TRIPHI);
+}
+
+if ((intStatus & ADC_EVT_TRIPLO) != 0U)
+{
+    ADC_clearPPBEventStatus(ADCA_BASE, ADC_PPB_NUMBER1,
+                            ADC_EVT_TRIPLO);
+}
+```
+
+本例关闭了 PPB 的逐周期自动清标志：
+
+```c
+ADC_disablePPBEventCBCClear(ADCA_BASE, ADC_PPB_NUMBER1);
+```
+
+因此 ISR 必须清除已经发生的 `TRIPHI` 或 `TRIPLO` 标志，否则后续同类 PPB 事件不能正常再次产生。
+
+### 8. 三个实际输入电压例子
+
+| A0 电压 | 近似 ADC 码 | 结果 | ISR 行为 |
+| --- | ---: | --- | --- |
+| `0.5 V` | `620` | `620 < 1000`，发生 `TRIPLO` | 进入 ISR，清低限事件。 |
+| `1.65 V` | `2048` | 在 `1000~3000` 正常范围内 | 不进入 PPB Event ISR。 |
+| `2.8 V` | `3476` | `3476 > 3000`，发生 `TRIPHI` | 进入 ISR，清高限事件。 |
+
+### 9. 映射到真实电机控制的过流保护
+
+若 A0 不是普通电压，而是相电流采样运放的输出：
+
+```text
+相电流过大
+    -> ADCRESULT 超出 PPB 限值
+    -> PPB TRIPHI/TRIPLO
+    -> ePWM Trip Zone 立即关断 PWM（硬件路径）
+    -> CPU ISR 记录故障原因（软件路径）
+```
+
+真正的功率级保护通常同时打开两条路径：
+
+```text
+PPB -> ePWM Trip Zone：优先保证关断速度。
+PPB -> INT_ADCA_EVT：记录故障、禁止重新启动、通知上层。
+```
+
+本例只打开第二条路径，因此它是学习 PPB 限值比较和事件中断的基础例程，不是可直接用于功率级保护的完整方案。
