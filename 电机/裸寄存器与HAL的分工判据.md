@@ -1,3 +1,15 @@
+---
+type: knowledge-note
+topic: motor-control
+status: learning
+updated: 2026-10-28
+tags:
+  - 电机控制
+  - 嵌入式
+  - STM32
+  - 代码规范
+---
+
 # 裸寄存器与 HAL 的分工判据（含"配置单一来源"原则）
 
 ## 结论

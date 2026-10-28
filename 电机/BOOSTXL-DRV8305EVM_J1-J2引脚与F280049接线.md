@@ -1,3 +1,15 @@
+---
+type: knowledge-note
+topic: motor-control
+status: learning
+updated: 2026-09-07
+tags:
+  - 电机控制
+  - DRV8305
+  - 引脚定义
+  - F280049
+---
+
 # BOOSTXL-DRV8305EVM J1/J2 引脚与 F280049 接线
 
 > [!info] 适用范围

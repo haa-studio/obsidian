@@ -1,3 +1,16 @@
+---
+type: knowledge-note
+topic: motor-control
+status: learning
+updated: 2026-10-28
+tags:
+  - 电机控制
+  - FOC
+  - SVPWM
+  - ADC
+  - 时序
+---
+
 # 一个 PWM 周期的时序与电流采样窗（推导版）
 
 ## 结论
